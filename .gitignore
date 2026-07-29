@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Facturas y resultados descargados por cuenta contrato — datos reales de
+# clientes (nombres, consumos, direcciones). Nunca deben subirse a git.
+/datos/
+
+# Capturas de pantalla de depuración de las sesiones de scraping — pueden
+# mostrar datos de cliente en pantalla. Nunca deben subirse a git.
+/debug/
+
+# Estado local de Claude Code
+.claude/
+
+.DS_Store
+*.log

@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agente EEQ — Descarga de Facturas</title>
+  <link rel="stylesheet" href="styles/app.css" />
+</head>
+<body>
+
+  <!-- HEADER -->
+  <header class="app-header">
+    <div class="app-header__marca">
+      <img src="assets/logos/logo_airis_soluciones-blanco.png" alt="Airis Soluciones" class="app-header__logo" />
+      <span class="app-header__divisor"></span>
+      <img src="assets/logos/aris_solar_logo_blanco.png" alt="Airis Solar" class="app-header__logo app-header__logo--solar" />
+    </div>
+    <div class="app-header__info">
+      <span class="app-header__nombre">Agente EEQ</span>
+      <span class="app-header__subtitulo" id="headerSubtitulo">Descarga de Facturas</span>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════ PANTALLA SELECTOR -->
+  <main id="pantallaSelector" class="pantalla pantalla--activa">
+    <div class="selector-wrap">
+      <div class="selector-card">
+        <div class="selector-card__icono">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+          </svg>
+        </div>
+        <h1 class="selector-card__titulo">Descarga de Facturas EEQ</h1>
+        <p class="selector-card__descripcion">
+          Ingresa los datos de la cuenta para descargar automáticamente tus facturas de la Empresa Eléctrica Quito.
+        </p>
+
+        <form id="formSelector" class="selector-form" autocomplete="off" novalidate>
+          <div class="campo">
+            <span class="campo__etiqueta">Números de Cuenta Contrato</span>
+            <div id="listaCuentas" class="lista-cuentas">
+              <div class="cuenta-fila">
+                <input type="text" class="campo__input cuenta-input" placeholder="Ej. 1234567890" autocomplete="off" />
+                <button type="button" class="btn-quitar-cuenta" aria-label="Quitar cuenta" style="display:none">×</button>
+              </div>
+            </div>
+            <button type="button" class="boton--agregar" id="btnAgregarCuenta">+ Agregar otra cuenta</button>
+            <span class="campo__nota">Número de la esquina superior derecha de tu factura. Puedes agregar varios.</span>
+          </div>
+
+          <label class="campo">
+            <span class="campo__etiqueta">Tipo de cliente</span>
+            <select id="selectTipoCliente" class="campo__select">
+              <option value="residencial">Residencial</option>
+              <option value="industrial">Industrial (tarifa MTCGCD32)</option>
+            </select>
+          </label>
+
+          <label class="campo">
+            <span class="campo__etiqueta">Planillas a descargar</span>
+            <select id="selectCantidad" class="campo__select">
+              <option value="12">Últimas 12 planillas</option>
+              <option value="24">Últimas 24 planillas</option>
+            </select>
+          </label>
+
+          <details class="ajustes-avanzados">
+            <summary>Ajustes avanzados</summary>
+            <div class="ajustes-grid">
+              <label class="campo campo--mini">
+                <span class="campo__etiqueta">Pausa descargas (s)</span>
+                <input type="number" id="cfgPausaDescargas" class="campo__input" value="5" min="2" max="30" />
+              </label>
+              <label class="campo campo--mini">
+                <span class="campo__etiqueta">Pausa entre lotes (s)</span>
+                <input type="number" id="cfgPausaLotes" class="campo__input" value="90" min="5" max="300" />
+              </label>
+              <label class="campo campo--mini">
+                <span class="campo__etiqueta">Descargas por lote</span>
+                <input type="number" id="cfgDescargasPorLote" class="campo__input" value="12" min="1" max="30" />
+              </label>
+            </div>
+          </details>
+
+          <div id="selectorError" class="mensaje-error" style="display:none"></div>
+
+          <button type="submit" class="boton boton--primario boton--full" id="btnIniciar">
+            Iniciar descarga
+          </button>
+          <button type="button" class="boton boton--secundario boton--full" id="btnAnalizarExistentes">
+            Analizar facturas existentes
+          </button>
+        </form>
+      </div>
+    </div>
+  </main>
+
+  <!-- ═══════════════════════════════════════════ PANTALLA PROGRESO -->
+  <main id="pantallaProgreso" class="pantalla">
+    <div class="progreso-layout">
+
+      <!-- Log en tiempo real -->
+      <div class="progreso-log">
+        <div class="progreso-log__cabecera">
+          <span class="progreso-log__titulo">Registro de actividad</span>
+          <span class="progreso-log__contador" id="logContador">0 eventos</span>
+        </div>
+        <div class="progreso-log__contenido" id="logContenido" role="log" aria-live="polite"></div>
+      </div>
+
+      <!-- Sidebar de estado -->
+      <aside class="progreso-sidebar">
+        <div class="ficha">
+          <h3 class="ficha__titulo">Sesión</h3>
+          <dl class="ficha__datos">
+            <dt>Cuenta</dt>
+            <dd id="fichaCuenta">—</dd>
+            <dt id="dtProgresoCuentas" style="display:none">Avance</dt>
+            <dd id="fichaProgresoCuentas" style="display:none">—</dd>
+            <dt>Tipo</dt>
+            <dd id="fichaTipo">—</dd>
+            <dt>Planillas</dt>
+            <dd id="fichaAnio">—</dd>
+          </dl>
+        </div>
+
+        <div class="ficha">
+          <h3 class="ficha__titulo">Progreso</h3>
+          <div class="barra-wrap">
+            <div class="barra-progreso" id="barraProgreso" style="width: 0%"></div>
+          </div>
+          <p class="progreso-texto" id="progresoTexto">Esperando documentos...</p>
+
+          <div id="pausaArea" class="pausa-area" style="display:none">
+            <div class="pausa-info">
+              <span class="pausa-texto" id="pausaTexto">Esperando...</span>
+              <span class="pausa-restante" id="pausaRestante">0s</span>
+            </div>
+            <button class="boton boton--secundario boton--full boton--sm" id="btnSaltarPausa">
+              Saltar pausa
+            </button>
+          </div>
+          <div class="progreso-stats">
+            <div class="stat">
+              <span class="stat__num" id="statDescargados">0</span>
+              <span class="stat__label">Descargadas</span>
+            </div>
+            <div class="stat stat--gris">
+              <span class="stat__num" id="statSaltados">0</span>
+              <span class="stat__label">Ya existían</span>
+            </div>
+          </div>
+        </div>
+
+        <button class="boton boton--secundario boton--full" id="btnCancelar">
+          Cancelar
+        </button>
+      </aside>
+    </div>
+  </main>
+
+  <!-- ═══════════════════════════════════════════ PANTALLA RESULTADOS -->
+  <main id="pantallaResultados" class="pantalla">
+    <div class="resultados-wrap">
+      <div class="resultados-card">
+
+        <div class="resultados-header" id="resultadosHeader">
+          <div class="resultado-icono resultado-icono--ok" id="resultadoIcono">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M5 13l4 4L19 7"/>
+            </svg>
+          </div>
+          <h2 class="resultados-titulo" id="resultadosTitulo">Descarga completada</h2>
+          <p class="resultados-resumen" id="resultadosResumen"></p>
+        </div>
+
+        <div class="archivos-seccion" id="archivosSeccion">
+          <div class="archivos-tabla-wrap">
+            <table class="archivos-tabla">
+              <thead>
+                <tr>
+                  <th>Archivo</th>
+                  <th>Año</th>
+                  <th>Estado</th>
+                </tr>
+              </thead>
+              <tbody id="archivosTablaBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="resultados-acciones">
+          <button class="boton boton--primario" id="btnNuevaDescarga">Nueva descarga</button>
+          <button class="boton boton--secundario" id="btnVerAnalisis">Calcular Anexos</button>
+          <button class="boton boton--secundario" id="btnAbrirCarpeta">Descargar ZIP</button>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <!-- ═══════════════════════════════════════════ PANTALLA ANÁLISIS -->
+  <main id="pantallaAnalisis" class="pantalla">
+    <div class="analisis-wrap">
+
+      <!-- Info de sesión activa (visible cuando se llega desde descarga) -->
+      <div id="analisisSesionInfo" class="analisis-sesion-info" style="display:none">
+        <span class="analisis-sesion-label">Calculando para:</span>
+        <span id="analisisSesionCuentas" class="analisis-sesion-chips"></span>
+        <span id="analisisTipoChip" class="badge-tipo"></span>
+      </div>
+
+      <!-- Inputs para modo standalone (Analizar facturas existentes) -->
+      <div id="analisisInputsStandalone" class="analisis-filtros">
+        <input type="text" id="analisisCuentas"
+               class="campo__input analisis-cuentas-input"
+               placeholder="N° cuentas contrato (separados por coma)">
+        <select id="analisisTipoCliente" class="campo__select analisis-select">
+          <option value="residencial">Residencial</option>
+          <option value="industrial">Industrial</option>
+        </select>
+      </div>
+
+      <div class="analisis-filtros analisis-filtros--acciones">
+        <button class="boton boton--primario" id="btnCalcular">Calcular consumo</button>
+        <button class="boton boton--secundario" id="btnVolverResultados" style="display:none">← Volver a resultados</button>
+      </div>
+
+      <div id="analisisCargando" class="analisis-cargando" style="display:none">
+        Analizando facturas…
+      </div>
+
+      <div id="analisisError" class="mensaje-error" style="display:none"></div>
+
+      <div id="analisisResultados"></div>
+
+    </div>
+  </main>
+
+  <!-- ═══════════════════════════════════════════ MODAL CAPTCHA -->
+  <div id="modalCaptcha" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="captchaTitulo" style="display:none">
+    <div class="modal">
+      <div class="modal__icono modal__icono--aviso">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+          <line x1="12" y1="9" x2="12" y2="13"/>
+          <line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+      </div>
+      <h3 class="modal__titulo" id="captchaTitulo">CAPTCHA detectado</h3>
+      <p class="modal__texto">
+        El sitio de la EEQ requiere una verificación de seguridad. Resuélvela
+        en el <strong>navegador que se abrió automáticamente</strong> y luego
+        haz clic en <strong>Continuar</strong>.
+      </p>
+      <button class="boton boton--primario boton--full" id="btnCaptchaResuelto">
+        Continuar
+      </button>
+    </div>
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
