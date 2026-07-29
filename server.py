@@ -38,6 +38,7 @@ import shutil
 import sys
 import threading
 import time
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -109,6 +110,12 @@ _eventos_lock = threading.Lock()
 _hilo: threading.Thread | None = None
 _captcha_ev = threading.Event()
 _skip_pausa_ev = threading.Event()
+
+# Operaciones solicitadas por sistemas externos (la plataforma). A diferencia
+# de la sesión histórica de la SPA, cada una tiene su propio estado, hilo y
+# evento de CAPTCHA para que dos PM no mezclen cuentas ni resultados.
+_operaciones: dict[str, dict] = {}
+_operaciones_lock = threading.Lock()
 
 
 def _hilo_descarga_vivo() -> bool:
@@ -323,6 +330,97 @@ def _ejecutar_en_hilo(cuentas: list, cantidad: int, tipo_cliente: str, config: d
 
 
 _reset()
+
+
+def _actualizar_operacion(operacion_id: str, **cambios) -> None:
+    """Actualiza de forma atómica el estado observable de una operación externa."""
+    with _operaciones_lock:
+        operacion = _operaciones.get(operacion_id)
+        if operacion is not None:
+            operacion.update(cambios)
+
+
+def _ejecutar_operacion_externa(operacion_id: str, cuenta: str, tipo_cliente: str, cantidad: int) -> None:
+    """Descarga, extrae y calcula una cuenta aislada para la API de operaciones."""
+    inicio = time.monotonic()
+    captcha_evento = threading.Event()
+
+    def progreso(evento: dict) -> None:
+        # Se expone el último evento como diagnóstico breve, sin compartir la
+        # cola global que usa la interfaz histórica del agente.
+        _actualizar_operacion(operacion_id, ultimo_evento=evento)
+
+    try:
+        _actualizar_operacion(operacion_id, estado="procesando")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            carpeta_pdfs = carpeta_temp_pdfs(cuenta)
+            if carpeta_pdfs.exists():
+                shutil.rmtree(carpeta_pdfs)
+            loop.run_until_complete(ejecutar(
+                cuenta, cantidad, tipo_cliente, on_progreso=progreso,
+                captcha_evento=captcha_evento, pausa_descargas=5,
+                pausa_lotes=90, descargas_por_lote=12,
+                skip_pausa_evento=threading.Event(),
+            ))
+        finally:
+            loop.close()
+
+        _extraer_y_guardar_json(cuenta, tipo_cliente)
+        resultado = analizar_global(
+            carpeta_temp_pdfs(cuenta), cuentas_filtro=[cuenta],
+            tipo_cliente=tipo_cliente, cantidad_max=cantidad,
+        ).get(f"{cuenta}_global")
+        if not resultado:
+            raise RuntimeError("No se encontraron facturas válidas para calcular el consumo.")
+        generar_json(resultado, carpeta_temp_pdfs(cuenta).parent / "resultado.json")
+        _actualizar_operacion(
+            operacion_id, estado="completada", resultado=resultado,
+            progreso=100, duracion_segundos=int(round(time.monotonic() - inicio)),
+        )
+    except Exception as error:
+        _actualizar_operacion(operacion_id, estado="error", error=str(error))
+
+
+@app.route("/api/operaciones", methods=["POST"])
+def crear_operacion():
+    """Crea una operación aislada para calcular automáticamente una cuenta contrato."""
+    datos = request.get_json() or {}
+    cuenta = str(datos.get("cuentaContrato", "")).strip()
+    tipo_cliente = str(datos.get("tipoCliente", "residencial")).strip().lower()
+    cantidad = datos.get("cantidad", 12)
+    if not cuenta:
+        return jsonify({"error": "La cuenta contrato es obligatoria."}), 400
+    if tipo_cliente not in ("residencial", "industrial"):
+        return jsonify({"error": "El tipo de cliente no es válido."}), 400
+    if cantidad != 12:
+        return jsonify({"error": "La plataforma solo calcula con 12 facturas."}), 400
+
+    operacion_id = str(uuid.uuid4())
+    with _operaciones_lock:
+        _operaciones[operacion_id] = {
+            "id": operacion_id, "cuenta_contrato": cuenta, "tipo_cliente": tipo_cliente,
+            "cantidad": 12, "estado": "pendiente", "progreso": 0,
+            "creada_en": time.time(), "ultimo_evento": None,
+        }
+    hilo = threading.Thread(
+        target=_ejecutar_operacion_externa,
+        args=(operacion_id, cuenta, tipo_cliente, 12), daemon=True,
+    )
+    hilo.start()
+    return jsonify({"operacionId": operacion_id, "estado": "pendiente"}), 202
+
+
+@app.route("/api/operaciones/<operacion_id>")
+def obtener_operacion(operacion_id: str):
+    """Devuelve el estado y, cuando exista, el resultado de una operación aislada."""
+    with _operaciones_lock:
+        operacion = _operaciones.get(operacion_id)
+        respuesta = dict(operacion) if operacion else None
+    if respuesta is None:
+        return jsonify({"error": "Operación no encontrada."}), 404
+    return jsonify(respuesta)
 
 # ---------------------------------------------------------------------------
 # Rutas de la interfaz web estática
