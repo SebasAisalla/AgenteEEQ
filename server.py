@@ -43,6 +43,16 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
+# Windows, al correr como servicio (NSSM redirige stdout/stderr a un archivo),
+# usa el codepage del sistema (cp1252) en vez de UTF-8 para stdout/stderr —
+# cualquier print()/log con un carácter fuera de cp1252 (ej. "→") revienta el
+# proceso con UnicodeEncodeError apenas arranca. Forzar UTF-8 aquí, con
+# errors="replace" como red de seguridad, evita que un símbolo suelto tumbe
+# todo el servicio en producción (ver incidente: server.py:845 con "→").
+for _flujo in (sys.stdout, sys.stderr):
+    if hasattr(_flujo, "reconfigure"):
+        _flujo.reconfigure(encoding="utf-8", errors="replace")
+
 from eeq_descargar_facturas import ejecutar, carpeta_temp_pdfs
 from consumo_calculator import analizar_global, analizar_global_desde_json
 from anexos_generator import (
@@ -842,7 +852,7 @@ def exportar_json_consumo():
 if __name__ == "__main__":
     import webbrowser
     url = f"http://localhost:{PORT}"
-    print(f"[AgenteEEQ] Servidor iniciado → {url}")
+    print(f"[AgenteEEQ] Servidor iniciado -> {url}")
     threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     # Escucha solo en localhost: en producción (Lightsail) Caddy es el único
     # que debe llegar a este puerto (reverse_proxy 127.0.0.1:3002 en
