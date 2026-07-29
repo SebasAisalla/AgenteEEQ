@@ -208,6 +208,13 @@ nssm set AIRISAgenteEEQ AppDirectory "C:\airis\AgenteEEQ"
 nssm start AIRISAgenteEEQ
 ```
 
+> **Integración con PlataformaWebProyectos:** este agente no usa Postgres ni
+> tiene migraciones propias. Cuando una actualización cambie las operaciones
+> EEQ, actualiza después la plataforma, ejecuta allí `npm run db:migrar` y
+> reinicia `AIRISPlataforma`; esas migraciones crean el registro de operaciones
+> y bloquean duplicados por proyecto. Reinicia ambos servicios antes de iniciar
+> un cálculo nuevo.
+
 `server.py` ya escucha en `127.0.0.1` (no `0.0.0.0`) — el firewall de Lightsail (solo 80/443
 abiertos) protege igual, pero es más explícito y consistente con el patrón de la plataforma.
 
