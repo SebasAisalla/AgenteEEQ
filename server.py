@@ -116,6 +116,7 @@ _skip_pausa_ev = threading.Event()
 # evento de CAPTCHA para que dos PM no mezclen cuentas ni resultados.
 _operaciones: dict[str, dict] = {}
 _operaciones_lock = threading.Lock()
+_eventos_captcha_operaciones: dict[str, threading.Event] = {}
 
 
 def _hilo_descarga_vivo() -> bool:
@@ -344,11 +345,15 @@ def _ejecutar_operacion_externa(operacion_id: str, cuenta: str, tipo_cliente: st
     """Descarga, extrae y calcula una cuenta aislada para la API de operaciones."""
     inicio = time.monotonic()
     captcha_evento = threading.Event()
+    _eventos_captcha_operaciones[operacion_id] = captcha_evento
 
     def progreso(evento: dict) -> None:
         # Se expone el último evento como diagnóstico breve, sin compartir la
         # cola global que usa la interfaz histórica del agente.
-        _actualizar_operacion(operacion_id, ultimo_evento=evento)
+        cambios = {"ultimo_evento": evento}
+        if evento.get("tipo") == "captcha":
+            cambios["estado"] = "esperando_captcha"
+        _actualizar_operacion(operacion_id, **cambios)
 
     try:
         _actualizar_operacion(operacion_id, estado="procesando")
@@ -381,6 +386,8 @@ def _ejecutar_operacion_externa(operacion_id: str, cuenta: str, tipo_cliente: st
         )
     except Exception as error:
         _actualizar_operacion(operacion_id, estado="error", error=str(error))
+    finally:
+        _eventos_captcha_operaciones.pop(operacion_id, None)
 
 
 @app.route("/api/operaciones", methods=["POST"])
@@ -421,6 +428,21 @@ def obtener_operacion(operacion_id: str):
     if respuesta is None:
         return jsonify({"error": "Operación no encontrada."}), 404
     return jsonify(respuesta)
+
+
+@app.route("/api/operaciones/<operacion_id>/captcha-resuelto", methods=["POST"])
+def reanudar_operacion_despues_captcha(operacion_id: str):
+    """Reanuda solo la operación cuyo CAPTCHA fue resuelto en el navegador del agente."""
+    with _operaciones_lock:
+        operacion = _operaciones.get(operacion_id)
+    evento = _eventos_captcha_operaciones.get(operacion_id)
+    if operacion is None or evento is None:
+        return jsonify({"error": "La operación no está esperando un CAPTCHA."}), 409
+    if operacion.get("estado") != "esperando_captcha":
+        return jsonify({"error": "La operación no está esperando un CAPTCHA."}), 409
+    _actualizar_operacion(operacion_id, estado="procesando")
+    evento.set()
+    return jsonify({"ok": True, "estado": "procesando"})
 
 # ---------------------------------------------------------------------------
 # Rutas de la interfaz web estática
