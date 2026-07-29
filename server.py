@@ -404,6 +404,16 @@ def crear_operacion():
     if cantidad != 12:
         return jsonify({"error": "La plataforma solo calcula con 12 facturas."}), 400
 
+    with _operaciones_lock:
+        hay_operacion_activa = any(
+            operacion.get("estado") in ("pendiente", "procesando", "esperando_captcha")
+            for operacion in _operaciones.values()
+        )
+    # eeq_descargar_facturas.py conserva contexto global de Playwright; dos
+    # ejecuciones simultáneas mezclarían callbacks y podrían dañar descargas.
+    if hay_operacion_activa:
+        return jsonify({"error": "AgenteEEQ ya está calculando otra cuenta; espera a que termine."}), 409
+
     operacion_id = str(uuid.uuid4())
     with _operaciones_lock:
         _operaciones[operacion_id] = {
