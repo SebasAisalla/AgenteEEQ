@@ -118,9 +118,76 @@ _operaciones: dict[str, dict] = {}
 _operaciones_lock = threading.Lock()
 _eventos_captcha_operaciones: dict[str, threading.Event] = {}
 
+# Si nadie resuelve el CAPTCHA de una operación en este tiempo, se marca como
+# error en vez de bloquear indefinidamente el guard de "una operación a la
+# vez" (ver crear_operacion) — sin esto, un PM que abandona la pestaña deja
+# el agente inutilizado hasta reiniciar el servicio.
+TIMEOUT_ESPERA_CAPTCHA_SEGUNDOS = 15 * 60
+
+# Cuánto se conserva una operación ya terminada (completada/error) antes de
+# descartarla — de sobra para que la plataforma haga polling y lea el
+# resultado; sin esto, _operaciones crece sin límite mientras el servicio
+# esté vivo (nunca se borra una entrada terminada).
+RETENCION_OPERACIONES_TERMINADAS_SEGUNDOS = 60 * 60
+
+
+def _purgar_operaciones_vencidas() -> None:
+    """
+    Marca como error las operaciones atascadas en 'esperando_captcha' más
+    allá del timeout, y descarta las que ya terminaron hace más de la
+    retención — se llama antes de decidir si hay una operación activa
+    (crear_operacion) para que una sesión abandonada no bloquee las nuevas.
+    """
+    ahora = time.time()
+    with _operaciones_lock:
+        vencidas_captcha = [
+            operacion_id
+            for operacion_id, operacion in _operaciones.items()
+            if operacion.get("estado") == "esperando_captcha"
+            and ahora - operacion.get("captcha_desde", ahora) > TIMEOUT_ESPERA_CAPTCHA_SEGUNDOS
+        ]
+        terminadas_viejas = [
+            operacion_id
+            for operacion_id, operacion in _operaciones.items()
+            if operacion.get("estado") in ("completada", "error")
+            and ahora - operacion.get("creada_en", ahora) > RETENCION_OPERACIONES_TERMINADAS_SEGUNDOS
+        ]
+
+    for operacion_id in vencidas_captcha:
+        _actualizar_operacion(
+            operacion_id, estado="error",
+            error="Se agotó el tiempo de espera del CAPTCHA (15 minutos) sin que se resolviera.",
+        )
+        _eventos_captcha_operaciones.pop(operacion_id, None)
+
+    if terminadas_viejas:
+        with _operaciones_lock:
+            for operacion_id in terminadas_viejas:
+                _operaciones.pop(operacion_id, None)
+
 
 def _hilo_descarga_vivo() -> bool:
     return _hilo is not None and _hilo.is_alive()
+
+
+def _operacion_externa_activa() -> bool:
+    """True si hay alguna operación aislada de la plataforma pendiente/procesando/esperando CAPTCHA."""
+    with _operaciones_lock:
+        return any(
+            operacion.get("estado") in ("pendiente", "procesando", "esperando_captcha")
+            for operacion in _operaciones.values()
+        )
+
+
+def _hilo_o_operacion_activos() -> bool:
+    """
+    True si hay una descarga en curso por cualquiera de las dos vías — la
+    sesión histórica de la SPA (_hilo) o una operación aislada de la
+    plataforma (_operaciones). Un solo Playwright puede correr a la vez (ver
+    comentario en crear_operacion/iniciar), así que ambos flujos deben
+    bloquearse mutuamente, no solo protegerse cada uno de sí mismo.
+    """
+    return _operacion_externa_activa() or _hilo_descarga_vivo()
 
 
 def _formatear_duracion(segundos: float) -> str:
@@ -353,6 +420,7 @@ def _ejecutar_operacion_externa(operacion_id: str, cuenta: str, tipo_cliente: st
         cambios = {"ultimo_evento": evento}
         if evento.get("tipo") == "captcha":
             cambios["estado"] = "esperando_captcha"
+            cambios["captcha_desde"] = time.time()
         _actualizar_operacion(operacion_id, **cambios)
 
     try:
@@ -404,14 +472,12 @@ def crear_operacion():
     if cantidad != 12:
         return jsonify({"error": "La plataforma solo calcula con 12 facturas."}), 400
 
-    with _operaciones_lock:
-        hay_operacion_activa = any(
-            operacion.get("estado") in ("pendiente", "procesando", "esperando_captcha")
-            for operacion in _operaciones.values()
-        )
+    _purgar_operaciones_vencidas()
     # eeq_descargar_facturas.py conserva contexto global de Playwright; dos
-    # ejecuciones simultáneas mezclarían callbacks y podrían dañar descargas.
-    if hay_operacion_activa:
+    # ejecuciones simultáneas mezclarían callbacks y podrían dañar descargas
+    # — cubre tanto otra operación de la plataforma como la sesión histórica
+    # de la SPA (_hilo), en cualquiera de los dos sentidos (ver _hilo_o_operacion_activos).
+    if _hilo_o_operacion_activos():
         return jsonify({"error": "AgenteEEQ ya está calculando otra cuenta; espera a que termine."}), 409
 
     operacion_id = str(uuid.uuid4())
@@ -543,6 +609,10 @@ def iniciar():
     tipo_cliente = data.get("tipo_cliente", "residencial").strip().lower()
     if tipo_cliente not in ("residencial", "industrial"):
         tipo_cliente = "residencial"
+
+    _purgar_operaciones_vencidas()
+    if _operacion_externa_activa():
+        return jsonify({"error": "AgenteEEQ está calculando una cuenta para la plataforma; espera a que termine."}), 409
 
     with _sesion_lock:
         if _sesion.get("estado") == "corriendo":
