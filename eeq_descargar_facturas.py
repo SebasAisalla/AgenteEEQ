@@ -1597,10 +1597,25 @@ async def descargar_por_anios_progresivo(
 
     Esto elimina la doble apertura del combo (enumerar + volver a seleccionar
     el mismo año) que hacía lento el arranque.
+
+    Al terminar de recorrer todos los años, si alguna factura real (con fila
+    encontrada en el portal) agotó sus reintentos sin descargarse, se le da
+    una tanda extra de reintentos antes de devolver el resultado final — para
+    que una falla puntual de un documento no reduzca el conteo por debajo de
+    lo que realmente existe en el portal (ver `docs_fallidos` más abajo).
     """
     global _anio_actual_descarga
 
     todos_descargados: list[Path] = []
+    # Facturas que sí se encontraron en el portal (existen, se intentó
+    # descargarlas) pero agotaron MAX_REINTENTOS_DESCARGA por una falla
+    # transitoria (timing del modal, portal lento, etc.) — se reintentan una
+    # vez más al final, después de recorrer todos los años, en vez de darlas
+    # por perdidas para siempre. Antes, si de 5 facturas reales disponibles 2
+    # fallaban sus reintentos, el resultado final quedaba en 3 sin ninguna
+    # segunda oportunidad, aunque el año/mes correspondiente sí tenía
+    # factura real en el portal (ver "docs_fallidos" más abajo).
+    docs_fallidos: list[tuple[DocumentoMeta, str]] = []
     descargas_desde_recarga = 0
 
     # Leer año actual sin abrir el combo
@@ -1726,6 +1741,13 @@ async def descargar_por_anios_progresivo(
                                 await guardar_screenshot_debug(page, f"error_descarga_{base_nombre}")
                             else:
                                 await _esperar_con_conteo(_pausa_entre_descargas * intento, "pausa reintentos")
+                else:
+                    # El `for` de reintentos terminó sin `break`: se agotaron
+                    # los MAX_REINTENTOS_DESCARGA intentos sin éxito. La
+                    # factura SÍ existe en el portal (se llegó a encontrar su
+                    # fila) — se guarda para un reintento final más abajo, en
+                    # vez de perderla en silencio.
+                    docs_fallidos.append((doc_meta, anio))
 
         # Si aún faltan facturas y todavía no hemos enumerado los demás años, hacerlo ahora
         if len(todos_descargados) < cantidad and not anios_enumerados:
@@ -1735,6 +1757,62 @@ async def descargar_por_anios_progresivo(
             if anios_pendientes:
                 _log("info", f"Años pendientes: {', '.join(anios_pendientes)}")
                 anios_a_procesar.extend(anios_pendientes)
+
+    # Segunda pasada de reintento: las facturas en `docs_fallidos` SÍ existen
+    # en el portal (se les encontró fila), pero fallaron sus reintentos
+    # normales por algo puntual del momento (portal lento, modal que no
+    # cerró a tiempo, etc.) — ya recorrimos todos los años posibles, así que
+    # cualquier hueco restante es esto y no "no hay más facturas". Vale la
+    # pena una tanda extra completa (mismo MAX_REINTENTOS_DESCARGA) antes de
+    # darlas por perdidas: es la diferencia entre "3 de 3 encontradas" cuando
+    # en realidad había 5 reales, y reportar las 5.
+    if docs_fallidos:
+        _log("info", f"Reintento final de {len(docs_fallidos)} factura(s) que fallaron su descarga inicial.")
+        aun_fallidos: list[tuple[DocumentoMeta, str]] = []
+        for doc_meta, anio in docs_fallidos:
+            base_nombre = limpiar_nombre_archivo(
+                doc_meta.numero_factura or doc_meta.numero_documento or f"doc_{doc_meta.indice}"
+            )
+            if descarga_existente(base_nombre, cuenta_contrato):
+                _log("skip", f"Ya existe {base_nombre}; omitiendo reintento final.")
+                continue
+
+            if anio != _anio_actual_descarga:
+                try:
+                    await seleccionar_anio_individual(contexto, anio)
+                    _anio_actual_descarga = anio
+                except Exception as exc:
+                    _log("aviso", f"No se pudo volver al año {anio} para el reintento final de {base_nombre}: {exc}.")
+                    aun_fallidos.append((doc_meta, anio))
+                    continue
+
+            documento = doc_meta_a_documento(doc_meta, contexto, len(todos_descargados))
+            exito = False
+            for intento in range(1, MAX_REINTENTOS_DESCARGA + 1):
+                try:
+                    ruta = await intentar_descargar_documento(page, contexto, documento, base_nombre, cuenta_contrato, anio)
+                    todos_descargados.append(ruta)
+                    print(f"[OK reintento final] Descargada: {ruta.name}")
+                    _emitir({"tipo": "descargado", "nombre": str(ruta), "anio": anio})
+                    await _esperar_con_conteo(_pausa_entre_descargas, "pausa entre descargas")
+                    exito = True
+                    break
+                except Exception as exc:
+                    _log("error", f"Reintento final {intento}/{MAX_REINTENTOS_DESCARGA} fallido para {base_nombre}: {exc}")
+                    await cerrar_modal_si_existe(contexto)
+                    if intento < MAX_REINTENTOS_DESCARGA:
+                        await _esperar_con_conteo(_pausa_entre_lotes, "pausa entre lotes")
+                        contexto = await recargar_hasta_documentos(page, cuenta_contrato, anio)
+            if not exito:
+                await guardar_screenshot_debug(page, f"error_descarga_final_{base_nombre}")
+                aun_fallidos.append((doc_meta, anio))
+
+        if aun_fallidos:
+            _log(
+                "aviso",
+                f"{len(aun_fallidos)} factura(s) existentes en el portal no se pudieron descargar "
+                "ni en el reintento final; quedan fuera del cálculo de consumo.",
+            )
 
     return todos_descargados
 
