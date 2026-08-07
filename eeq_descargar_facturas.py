@@ -1617,6 +1617,24 @@ async def descargar_por_anios_progresivo(
     # factura real en el portal (ver "docs_fallidos" más abajo).
     docs_fallidos: list[tuple[DocumentoMeta, str]] = []
     descargas_desde_recarga = 0
+    # Números de factura/documento ya vistos en CUALQUIER año de esta
+    # ejecución — no solo los descargados con éxito, sino todos los que
+    # aparecieron en la tabla. Sirve para detectar cuando cambiar de año no
+    # trajo nada distinto (ver `anios_consecutivos_sin_novedad` abajo): el
+    # combo "Buscar por año" puede fallar en cambiar de año silenciosamente
+    # (ver la advertencia de `esperar_actualizacion_documentos`) y dejar la
+    # misma tabla visible — sin esto, el bucle seguiría "probando" cada año
+    # histórico uno por uno aunque cada intento devuelva exactamente las
+    # mismas facturas ya vistas, perdiendo tiempo real contra el portal.
+    numeros_conocidos: set[str] = set()
+    # Cuántos años seguidos NO aportaron ninguna factura nueva (ni vacíos, ni
+    # con puros duplicados de un año ya leído). En la práctica, la cuenta de
+    # un cliente tiene historial continuo: si un año no aporta nada nuevo, es
+    # prácticamente seguro que los años AÚN más antiguos tampoco lo harán —
+    # seguir probándolos uno por uno solo agrega minutos de navegación sin
+    # ganar ninguna factura real.
+    anios_consecutivos_sin_novedad = 0
+    UMBRAL_ANIOS_SIN_NOVEDAD_PARA_DETENER = 1
 
     # Leer año actual sin abrir el combo
     anio_inicial = await obtener_anio_actual_combo(contexto)
@@ -1642,6 +1660,13 @@ async def descargar_por_anios_progresivo(
     # Si ya enumeramos arriba, partimos con los años más recientes para no abrir el combo dos veces.
     anios_a_procesar: list[str] = anios_pre_enumerados if anios_pre_enumerados else [anio_inicial]
     anios_enumerados: bool = bool(anios_pre_enumerados) and not anios_truncados
+    # true solo a partir de que se agotó el lote inicial (el año visible, o
+    # los pocos años pre-enumerados) y se amplió la lista con el resto del
+    # historial — el corte por "sin novedad" (más abajo) SOLO aplica a esta
+    # fase histórica, nunca al lote inicial: un año reciente vacío (ej. el
+    # año actual, sin facturas emitidas todavía) no significa que el año
+    # anterior también lo esté, así que ahí sí hay que seguir buscando.
+    en_fase_historica_pendiente = False
 
     anio_idx = 0
     while anio_idx < len(anios_a_procesar):
@@ -1675,9 +1700,39 @@ async def descargar_por_anios_progresivo(
             _log("aviso", f"No se pudo leer el año {anio}: {exc}; continuando.")
             continue
 
-        if not docs_anio:
-            _log("info", f"Año {anio}: sin facturas")
+        # Clave de identidad de un documento — mismo criterio que `base_nombre`
+        # más abajo (número de factura, o de documento si no hay factura),
+        # sin la limpieza de nombre de archivo porque aquí solo se usa para
+        # comparar, no para guardar en disco.
+        claves_del_anio = {(d.numero_factura or d.numero_documento or f"idx-{d.indice}") for d in docs_anio}
+        claves_nuevas = claves_del_anio - numeros_conocidos
+        numeros_conocidos |= claves_del_anio
+
+        if not docs_anio or not claves_nuevas:
+            if docs_anio:
+                _log(
+                    "info",
+                    f"Año {anio}: {len(docs_anio)} documento(s) leídos, pero ya se habían visto en otro "
+                    "año (el portal probablemente no cambió de año realmente) — no hay nada nuevo aquí.",
+                )
+            else:
+                _log("info", f"Año {anio}: sin facturas")
+
+            # El corte por "sin novedad" solo cuenta durante la fase histórica
+            # (años más allá del lote inicial) — un año del lote inicial sin
+            # nada nuevo (ej. el año actual, todavía sin facturas emitidas)
+            # no dice nada sobre años anteriores, así que ahí no se corta.
+            if en_fase_historica_pendiente:
+                anios_consecutivos_sin_novedad += 1
+                if anios_consecutivos_sin_novedad >= UMBRAL_ANIOS_SIN_NOVEDAD_PARA_DETENER:
+                    _log(
+                        "info",
+                        f"{anios_consecutivos_sin_novedad} año(s) seguido(s) sin ninguna factura nueva — se asume "
+                        "que los años anteriores tampoco tendrán y se detiene la búsqueda aquí para no perder tiempo.",
+                    )
+                    break
         else:
+            anios_consecutivos_sin_novedad = 0
             docs_ordenados = sorted(docs_anio, key=lambda d: d.fecha_dt, reverse=True)
             faltan = cantidad - len(todos_descargados)
             docs_a_descargar = docs_ordenados[:faltan]
@@ -1757,6 +1812,10 @@ async def descargar_por_anios_progresivo(
             if anios_pendientes:
                 _log("info", f"Años pendientes: {', '.join(anios_pendientes)}")
                 anios_a_procesar.extend(anios_pendientes)
+                # A partir de aquí, todo lo que quede en anios_a_procesar es
+                # historial más allá del lote inicial — el corte por "sin
+                # novedad" ya puede aplicar desde el próximo año.
+                en_fase_historica_pendiente = True
 
     # Segunda pasada de reintento: las facturas en `docs_fallidos` SÍ existen
     # en el portal (se les encontró fila), pero fallaron sus reintentos
